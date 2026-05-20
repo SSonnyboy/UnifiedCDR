@@ -1,0 +1,59 @@
+# ==================== LightGCN 基线配置 ====================
+LightGCN:
+  embedding_size: 64
+  n_layers: 2
+  epoch: 100
+  batch_size: 1024
+  lr: 0.001
+  neg_ratio: 1
+  reg_weight: 0.0001
+  drop_rate: 0.0        # LightGCN 无 dropout
+
+# ==================== UnifiedCDR 配置 ====================
+# 融合 CrossAug 数据增强 + DGCDR 监督解耦
+
+UnifiedCDR:
+  # ----- 基础架构 -----
+  embedding_size: 64        # 每层GNN输出维度
+  common_dim: 32            # 解耦后的 common 子空间维度（DGCDR）
+  n_layers: 2               # GNN层数（LightGCN风格）
+  epoch: 100                # 训练轮数
+  batch_size: 1024          # 训练batch大小
+  lr: 0.001                 # 学习率
+  neg_ratio: 1              # 每个正样本配几个负样本
+  reg_weight: 0.0001        # L2正则权重
+  drop_rate: 0.2            # Dropout率
+  temperature: 0.1          # 对比学习温度系数
+
+  # ----- CrossAug 数据增强 -----
+  local_alpha: 0.7          # 局部增强混合系数
+  cd_alpha: 0.7             # 跨域增强混合系数
+  local_lambda: 0.5         # 局部增强损失权重（0=关闭）
+  cd_lambda: 0.5            # 跨域增强损失权重（0=关闭）
+  align_lambda: 0.0         # 均值对齐损失权重（本项目用DGCDR的similarity loss替代）
+  cbatch_size: 512          # 跨域增强采样batch大小
+
+  # ----- DGCDR 监督解耦 -----
+  cl_sim_weight: 0.01       # common相似度损失权重（跨域一致性）
+  cl_org_weight: 1.0        # 正交损失权重（common/specific分离性）
+
+# -------------------- 数据集配置 --------------------
+datasets:
+  Amazon:
+    Movie-Music:
+      path: "./datasets/processed/Amazon/Movie-Music"
+      n_shared_users: 500    # 重叠用户数
+      domain_1:               # Movie 域
+        name: "Movie"
+        n_users: 3000
+        n_items: 2000
+        n_train: 25000
+        n_valid: 500
+        n_test: 500
+      domain_2:               # Music 域
+        name: "Music"
+        n_users: 2000
+        n_items: 1500
+        n_train: 15000
+        n_valid: 500
+        n_test: 500
