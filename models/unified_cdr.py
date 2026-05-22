@@ -85,10 +85,12 @@ class UnifiedCDR(nn.Module):
         self.d2_item_common = nn.Linear(self.gnn_dim, self.common_dim, dtype=self.dtype)
         self.d2_item_specific = nn.Linear(self.gnn_dim, self.common_dim, dtype=self.dtype)
 
-        # ---------- Attention 融合层 ----------
-        # 对 common/specific 各学1个权重，加权后拼接恢复 gnn_dim
-        self.d1_fuse_att = nn.Linear(self.common_dim * 2, 2, dtype=self.dtype)
-        self.d2_fuse_att = nn.Linear(self.common_dim * 2, 2, dtype=self.dtype)
+        # ---------- SENet 风格融合层 ----------
+        # 瓶颈结构: concat(common, specific) → squeeze → excitation → 2维权重
+        self.d1_fuse_squeeze = nn.Linear(self.common_dim * 2, self.common_dim // 2, dtype=self.dtype)
+        self.d1_fuse_excite = nn.Linear(self.common_dim // 2, 2, dtype=self.dtype)
+        self.d2_fuse_squeeze = nn.Linear(self.common_dim * 2, self.common_dim // 2, dtype=self.dtype)
+        self.d2_fuse_excite = nn.Linear(self.common_dim // 2, 2, dtype=self.dtype)
 
         self.dropout = nn.Dropout(self.drop_rate)
         self.apply(self._xavier_init)
@@ -150,11 +152,15 @@ class UnifiedCDR(nn.Module):
         specific = proj_specific(emb)   # [N, gnn_dim] → [N, common_dim]
         return common, specific
 
-    def _fuse_attention(self, common, specific, att_layer):
-        """Attention融合: 对 common/specific 各学1个权重，加权后拼接恢复原维度"""
-        att = F.softmax(att_layer(torch.cat([common, specific], dim=-1)), dim=-1)
-        weighted_common = att[:, 0:1] * common
-        weighted_specific = att[:, 1:2] * specific
+    def _fuse_attention(self, common, specific, squeeze_layer, excite_layer):
+        """SENet 风格融合: 残差注意力门控，输出范围 [x, 2x]，不缩小"""
+        # Squeeze: 拼接 common + specific
+        cat = torch.cat([common, specific], dim=-1)  # [N, common_dim*2]
+        # Excitation: 瓶颈结构 → 2维权重
+        att = torch.sigmoid(excite_layer(F.relu(squeeze_layer(cat))))  # [N, 2]
+        # 残差缩放: (1 + weight) * x，weight∈[0,1] → 输出∈[x, 2x]
+        weighted_common = (1 + att[:, 0:1]) * common
+        weighted_specific = (1 + att[:, 1:2]) * specific
         return torch.cat([weighted_common, weighted_specific], dim=-1)  # [N, gnn_dim]
 
     # ==================== 3. 前向传播 ====================
@@ -188,12 +194,16 @@ class UnifiedCDR(nn.Module):
         d1_i_c, d1_i_s = self._disentangle(d1_i_gnn, self.d1_item_common, self.d1_item_specific)
         d2_i_c, d2_i_s = self._disentangle(d2_i_gnn, self.d2_item_common, self.d2_item_specific)
 
-        # --- Attention融合（加权后拼接恢复原维度） ---
-        d1_user_final = self._fuse_attention(d1_u_c, d1_u_s, self.d1_fuse_att)
-        d2_user_final = self._fuse_attention(d2_u_c, d2_u_s, self.d2_fuse_att)
+        # --- SENet 融合（残差注意力门控） ---
+        d1_user_final = self._fuse_attention(d1_u_c, d1_u_s,
+                                              self.d1_fuse_squeeze, self.d1_fuse_excite)
+        d2_user_final = self._fuse_attention(d2_u_c, d2_u_s,
+                                              self.d2_fuse_squeeze, self.d2_fuse_excite)
 
-        d1_item_final = self._fuse_attention(d1_i_c, d1_i_s, self.d1_fuse_att)
-        d2_item_final = self._fuse_attention(d2_i_c, d2_i_s, self.d2_fuse_att)
+        d1_item_final = self._fuse_attention(d1_i_c, d1_i_s,
+                                              self.d1_fuse_squeeze, self.d1_fuse_excite)
+        d2_item_final = self._fuse_attention(d2_i_c, d2_i_s,
+                                              self.d2_fuse_squeeze, self.d2_fuse_excite)
 
         # 保存解耦结果供损失计算（全部用户 + 全部物品）
         self.disentangle_info = {
@@ -207,7 +217,7 @@ class UnifiedCDR(nn.Module):
 
     # ==================== 4. 损失函数 ====================
     def get_score(self, u, i):
-        return torch.mul(F.normalize(u, dim=-1), F.normalize(i, dim=-1)).sum(dim=-1)
+        return torch.mul(u, i).sum(dim=-1)
 
     def bpr_loss(self, pos, neg):
         return -torch.mean(torch.log(torch.sigmoid(pos - neg) + 1e-24))
